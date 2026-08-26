@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Build Artifacts
+build/
+dist/
+*.spec
+
+# Local runtime data & Game sync folder
+RAFT_WORLD/
+raft_backups/
+config.json
+
+# Logs & Temporary files
+*.log
+*.tmp
+*.temp
+
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+
+# IDE / Editor configurations
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS specific files
+Thumbs.db
+Desktop.ini
+.DS_Store
