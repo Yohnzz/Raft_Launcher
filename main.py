@@ -393,34 +393,45 @@ class RaftWorldManager:
         if not os.path.exists(world_path):
             return []
         saves = []
+        world_name = os.path.basename(os.path.normpath(world_path))
         for item in os.listdir(world_path):
             p = os.path.join(world_path, item)
-            if os.path.isdir(p) and not item.startswith(".") and item not in ["backups", "OldSaveSystem-Backup"]:
-                mtime = os.path.getmtime(p)
-                mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
-                is_latest = item.lower().endswith("-latest") or "latest" in item.lower()
-                size_bytes = RaftWorldManager.get_dir_size(p)
-                size_kb = size_bytes / 1024
-                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.2f} MB"
-                saves.append({
-                    "name": item,
-                    "is_latest": is_latest,
-                    "mtime": mtime,
-                    "mtime_str": mtime_str,
-                    "size_bytes": size_bytes,
-                    "size_str": size_str,
-                    "path": p
-                })
+            # Skip non-directories, hidden folders (.git, etc.)
+            if not os.path.isdir(p) or item.startswith("."):
+                continue
+            # Skip system folders, backup folders, or the base world-named config folder itself
+            if item in ["backups", "OldSaveSystem-Backup"] or item.lower() == world_name.lower():
+                continue
+            # Skip folders containing sync metadata (sync_meta.json / sync.meta)
+            if os.path.exists(os.path.join(p, "sync_meta.json")) or os.path.exists(os.path.join(p, "sync.meta")):
+                continue
+
+            mtime = os.path.getmtime(p)
+            mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            is_latest = item.lower().endswith("-latest") or "latest" in item.lower()
+            size_bytes = RaftWorldManager.get_dir_size(p)
+            size_kb = size_bytes / 1024
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.2f} MB"
+            saves.append({
+                "name": item,
+                "is_latest": is_latest,
+                "mtime": mtime,
+                "mtime_str": mtime_str,
+                "size_bytes": size_bytes,
+                "size_str": size_str,
+                "path": p
+            })
         # Sort latest first, then by modification time
         saves.sort(key=lambda x: (not x["is_latest"], -x["mtime"]))
         return saves
 
     @staticmethod
     def clean_old_saves(world_path, specific_save_names=None):
-        """Deletes old autosave folders, preserving only active '-Latest' save folder."""
+        """Deletes old autosave folders, preserving active '-Latest' and world config/meta folders."""
         if not os.path.exists(world_path):
             return 0, 0
 
+        world_name = os.path.basename(os.path.normpath(world_path))
         saves = RaftWorldManager.get_all_saves_in_world(world_path)
         deleted_count = 0
         freed_bytes = 0
@@ -428,6 +439,10 @@ class RaftWorldManager:
         for s in saves:
             if s["is_latest"]:
                 continue  # Never delete active -Latest save
+            if s["name"].lower() == world_name.lower():
+                continue  # Protect world config folder
+            if os.path.exists(os.path.join(s["path"], "sync_meta.json")) or os.path.exists(os.path.join(s["path"], "sync.meta")):
+                continue
 
             if specific_save_names is not None and s["name"] not in specific_save_names:
                 continue
