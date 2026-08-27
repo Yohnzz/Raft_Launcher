@@ -19,7 +19,7 @@ import winreg
 # =========================================================
 
 APP_NAME = "Raft Multiplayer Launcher"
-APP_VERSION = "V 0.3.5"
+APP_VERSION = "V 0.3.6"
 APP_TITLE = f"Raft Multiplayer Launcher ({APP_VERSION}) - (by Yohnzz)"
 APP_AUTHOR = "Igna"
 DEFAULT_UPDATE_REPO = "Yohnzz/Raft_Launcher"  # Default GitHub Repo for releases
@@ -728,6 +728,14 @@ class SampRaftClient:
         # Check Steam status
         self.check_steam_status()
 
+        # Global Keyboard Shortcuts
+        self.root.bind("<F5>", lambda e: self.refresh_worlds())
+        self.root.bind("<F9>", lambda e: self.start_sync_and_play())
+        self.root.bind("<Control-l>", lambda e: self.clear_log())
+        self.root.bind("<Control-L>", lambda e: self.clear_log())
+        self.root.bind("<Control-u>", lambda e: self.check_updates_gui(manual=True))
+        self.root.bind("<Control-U>", lambda e: self.check_updates_gui(manual=True))
+
         # Check for updates in background after launch
         self.root.after(3500, lambda: self.check_updates_gui(manual=False))
 
@@ -744,6 +752,12 @@ class SampRaftClient:
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
+
+        # Edit
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Clear Activity Log", accelerator="Ctrl+L", command=self.clear_log)
+        edit_menu.add_command(label="Copy All Logs to Clipboard", command=self.copy_log)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
 
         # View
         view_menu = tk.Menu(menubar, tearoff=0)
@@ -778,9 +792,9 @@ class SampRaftClient:
 
         # Help
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="🔍 Check for Updates", command=lambda: self.check_updates_gui(manual=True))
+        help_menu.add_command(label="🔍 Check for Updates", accelerator="Ctrl+U", command=lambda: self.check_updates_gui(manual=True))
         help_menu.add_separator()
-        help_menu.add_command(label=f"About {APP_NAME}", command=lambda: messagebox.showinfo("About", f"{APP_NAME} {APP_VERSION}\nAuthor: {APP_AUTHOR}\n\nDedicated multiplayer turn-based world synchronizer for Raft."))
+        help_menu.add_command(label=f"About {APP_NAME}", command=lambda: messagebox.showinfo("About", f"{APP_NAME} {APP_VERSION}\nAuthor: {APP_AUTHOR}\n\nDedicated multiplayer turn-based world synchronizer for Raft.\n\nKey Shortcuts:\n• F5: Refresh World List\n• F9: Connect (Sync & Play)\n• Ctrl+L: Clear Log\n• Ctrl+U: Check for Updates"))
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
@@ -881,7 +895,12 @@ class SampRaftClient:
                             insertbackground=t["entry_fg"],
                             disabledbackground=t["entry_bg"])
 
-        # --- Log text box ---
+        # --- Log text box and toolbar ---
+        if hasattr(self, "log_toolbar"):
+            self.log_toolbar.configure(bg=t["tab_bg"])
+            self.btn_clear_log.configure(bg=t["btn_bg"], fg=t["btn_fg"])
+            self.btn_copy_log.configure(bg=t["btn_bg"], fg=t["btn_fg"])
+            self.lbl_log_hint.configure(bg=t["tab_bg"], fg=t["label_fg"])
         self.log_text.configure(bg=t["log_bg"], fg=t["log_fg"])
 
         # --- Status bar ---
@@ -1101,6 +1120,18 @@ class SampRaftClient:
         self.tab_log = tk.Frame(self.notebook, bg="#f5f5f5", padx=6, pady=4)
         self.notebook.add(self.tab_log, text=" Activity Log ")
 
+        self.log_toolbar = tk.Frame(self.tab_log, bg="#f5f5f5")
+        self.log_toolbar.pack(fill="x", side="top", pady=(0, 4))
+
+        self.btn_clear_log = tk.Button(self.log_toolbar, text="🗑️ Clear Log", font=("Segoe UI", 8), bg="#e0e0e0", relief="groove", padx=6, pady=1, command=self.clear_log)
+        self.btn_clear_log.pack(side="left", padx=(0, 4))
+
+        self.btn_copy_log = tk.Button(self.log_toolbar, text="📋 Copy Log", font=("Segoe UI", 8), bg="#e0e0e0", relief="groove", padx=6, pady=1, command=self.copy_log)
+        self.btn_copy_log.pack(side="left", padx=(0, 4))
+
+        self.lbl_log_hint = tk.Label(self.log_toolbar, text="Shortcuts: [F5] Refresh  |  [Ctrl+L] Clear Log  |  [Ctrl+U] Update Check", font=("Segoe UI", 8), fg="#777777", bg="#f5f5f5")
+        self.lbl_log_hint.pack(side="right")
+
         log_scroll = tk.Scrollbar(self.tab_log, orient="vertical")
         log_scroll.pack(side="right", fill="y")
         self.log_text = tk.Text(self.tab_log, height=5, font=("Consolas", 9), bg="#1e1e1e", fg="#ffffff", yscrollcommand=log_scroll.set)
@@ -1287,6 +1318,21 @@ class SampRaftClient:
             self.log_text.see("end")
             self.statusbar.config(text=f"Status: {message}")
         self.root.after(0, write)
+
+    def clear_log(self):
+        """Clears all text in the Activity Log tab."""
+        self.log_text.delete("1.0", "end")
+        self.log("Activity Log telah dibersihkan.")
+
+    def copy_log(self):
+        """Copies all text in the Activity Log to clipboard."""
+        content = self.log_text.get("1.0", "end-1c").strip()
+        if content:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.statusbar.config(text="Status: ✓ Activity Log berhasil disalin ke clipboard.")
+        else:
+            self.statusbar.config(text="Status: Log masih kosong.")
 
     def run_async(self, func, *args):
         threading.Thread(target=func, args=args, daemon=True).start()
