@@ -19,7 +19,7 @@ import winreg
 # =========================================================
 
 APP_NAME = "Raft Multiplayer Launcher"
-APP_VERSION = "V 0.3.6"
+APP_VERSION = "V 0.3.7"
 APP_TITLE = f"Raft Multiplayer Launcher ({APP_VERSION}) - (by Yohnzz)"
 APP_AUTHOR = "Igna"
 DEFAULT_UPDATE_REPO = "Yohnzz/Raft_Launcher"  # Default GitHub Repo for releases
@@ -160,9 +160,15 @@ class UpdateManager:
                         percent = (downloaded / total_size) * 100
                         on_progress(percent, downloaded, total_size)
 
+            clean_env = os.environ.copy()
+            clean_env.pop('_MEIPASS2', None)
+            clean_env.pop('_MEIPASS', None)
+
             exe_dir = os.path.dirname(current_exe_path)
             updater_bat = os.path.join(exe_dir, "update_launcher.bat")
             script = f"""@echo off
+set _MEIPASS2=
+set _MEIPASS=
 cd /d "{exe_dir}"
 timeout /t 3 /nobreak > nul
 :retry
@@ -173,6 +179,8 @@ if exist "{current_exe_path}" (
 )
 move /y "{temp_exe}" "{current_exe_path}" > nul 2>&1
 timeout /t 1 /nobreak > nul
+set _MEIPASS2=
+set _MEIPASS=
 start "" "{current_exe_path}"
 del "%~f0" > nul 2>&1
 exit
@@ -180,8 +188,8 @@ exit
             with open(updater_bat, "w", encoding="utf-8") as f:
                 f.write(script)
 
-            # Run updater script and exit current process
-            subprocess.Popen([updater_bat], shell=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            # Run updater script with clean environment and exit current process
+            subprocess.Popen([updater_bat], shell=True, env=clean_env, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             os._exit(0)
         except Exception as e:
             if os.path.exists(temp_exe):
