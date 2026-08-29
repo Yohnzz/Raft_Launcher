@@ -1,0 +1,32 @@
+=========================================================
+RAFT MULTIPLAYER LAUNCHER - TERMS & USER AGREEMENT
+=========================================================
+
+Selamat datang di Raft Multiplayer Launcher!
+
+Sebelum menginstal dan menggunakan aplikasi ini, harap membaca dan
+menyetujui ketentuan penggunaan berikut:
+
+1. TUJUAN APLIKASI
+   Raft Multiplayer Launcher dirancang untuk memudahkan sinkronisasi
+   save game dan permainan multiplayer turn-based / co-op pada game Raft
+   secara otomatis melalui Git & GitHub.
+
+2. SINKRONISASI SAVE GAME
+   - Aplikasi ini akan membaca dan memperbarui save game Raft Anda
+     sesuai dengan world repository bersama yang telah ditentukan.
+   - Aplikasi secara otomatis membuat cadangan (backup) save game lokal
+     sebelum melakukan pembaruan untuk menjaga keamanan data Anda.
+
+3. PRIVASI & KEAMANAN
+   - Aplikasi tidak mengumpulkan atau mengirimkan data pribadi Anda
+     ke server pihak ketiga selain repositori GitHub yang Anda konfigurasikan.
+   - Kredensial dan pengaturan disimpan secara lokal di komputer Anda.
+
+4. DUKUNGAN & PEMBARUAN
+   - Pengembang terus memperbarui fitur dan stabilitas launcher.
+   - Anda dapat memeriksa pembaruan kapan saja melalui menu 'Help > Check for Updates'.
+
+Dengan memilih "I accept the agreement" (Saya Setuju), Anda menyetujui
+ketentuan di atas dan dapat melanjutkan proses instalasi.
+=========================================================
