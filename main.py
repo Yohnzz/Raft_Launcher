@@ -19,7 +19,7 @@ import winreg
 # =========================================================
 
 APP_NAME = "Raft Multiplayer Launcher"
-APP_VERSION = "V 0.3.8"
+APP_VERSION = "V 0.3.9"
 APP_TITLE = f"Raft Multiplayer Launcher ({APP_VERSION}) - (by Yohnzz)"
 APP_AUTHOR = "Igna"
 DEFAULT_UPDATE_REPO = "Yohnzz/Raft_Launcher"  # Default GitHub Repo for releases
@@ -701,6 +701,31 @@ class GitEngine:
                     res = self.run(["push", "--force", "origin", branch])
         return res
 
+    def fetch(self, branch="master"):
+        return self.run(["fetch", "origin", branch])
+
+    def check_remote_ahead(self, branch="master"):
+        """Checks if origin/branch has new commits not in local HEAD. Returns (is_behind, list_of_commits)."""
+        f_res = self.fetch(branch=branch)
+        if not f_res["success"]:
+            return False, []
+
+        log_res = self.run(["log", f"HEAD..origin/{branch}", "--pretty=format:%H|%an|%s|%cr", "-n", "5"])
+        if not log_res["success"] or not log_res["stdout"]:
+            return False, []
+
+        commits = []
+        for line in log_res["stdout"].splitlines():
+            parts = line.strip().split("|")
+            if len(parts) >= 4:
+                commits.append({
+                    "hash": parts[0],
+                    "author": parts[1],
+                    "subject": parts[2],
+                    "relative_time": parts[3]
+                })
+        return len(commits) > 0, commits
+
 
 # =========================================================
 # AUTHENTIC SA-MP 0.3.7 STYLE CLIENT GUI
@@ -759,8 +784,16 @@ class SampRaftClient:
         self.root.bind("<Control-u>", lambda e: self.check_updates_gui(manual=True))
         self.root.bind("<Control-U>", lambda e: self.check_updates_gui(manual=True))
 
+        # Remote Push Notification state
+        self._last_notified_commit = None
+        self._is_checking_remote = False
+        self._alert_dialog_open = False
+
         # Check for updates in background after launch
         self.root.after(3500, lambda: self.check_updates_gui(manual=False))
+
+        # Check for remote pushes by friends in background periodically
+        self.root.after(4500, self.poll_remote_push_notification)
 
     # =====================================================
     # TOP CLASSIC MENU BAR
@@ -1271,6 +1304,9 @@ class SampRaftClient:
         else:
             self.statusbar.config(text=f"Status: No worlds found in selected user profile. | Author: {APP_AUTHOR} ({APP_VERSION})")
             self.clear_details()
+
+        # Trigger remote push check in background
+        self.check_remote_push_notification()
 
     def on_tree_select(self, event):
         selected = self.tree.selection()
@@ -1952,6 +1988,158 @@ class SampRaftClient:
             self.log("✓ Git push berhasil ke GitHub.")
         else:
             self.log(f"✗ Git push gagal: {res['stderr']}")
+
+    # =====================================================
+    # REMOTE PUSH NOTIFICATION & BACKGROUND MONITORING
+    # =====================================================
+
+    def parse_commit_info(self, commit):
+        """Extracts player name and world name from commit subject."""
+        subject = commit.get("subject", "")
+        player = commit.get("author", "Teman")
+        world = self.config.get("selected_world", "") or "World"
+
+        # Extract [PlayerName]
+        m_player = re.search(r'\[(.*?)\]', subject)
+        if m_player:
+            player = m_player.group(1).strip()
+
+        # Extract world 'WorldName'
+        m_world = re.search(r"world\s+['\"](.*?)['\"]", subject, re.IGNORECASE)
+        if m_world:
+            world = m_world.group(1).strip()
+
+        return player, world
+
+    def check_remote_push_notification(self):
+        """Checks if remote repository has new commits from others and alerts the user to Pull."""
+        if self._is_checking_remote or self.is_playing:
+            return
+        self._is_checking_remote = True
+
+        def worker():
+            try:
+                repo_path = self.repo_path_var.get().strip()
+                branch = self.branch_var.get().strip() or "master"
+                if not repo_path:
+                    return
+                git = GitEngine(repo_path)
+                if not git.is_valid_repo():
+                    return
+
+                is_behind, commits = git.check_remote_ahead(branch=branch)
+                if is_behind and commits:
+                    latest_commit = commits[0]
+                    c_hash = latest_commit["hash"]
+
+                    # Alert only once per new commit hash
+                    if c_hash != self._last_notified_commit:
+                        self._last_notified_commit = c_hash
+                        player_name, world_name = self.parse_commit_info(latest_commit)
+                        self.root.after(0, lambda: self._show_remote_push_alert(player_name, world_name, latest_commit))
+            except Exception:
+                pass
+            finally:
+                self._is_checking_remote = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def poll_remote_push_notification(self):
+        """Periodic background poll for remote pushes every 45 seconds."""
+        self.check_remote_push_notification()
+        self.root.after(45000, self.poll_remote_push_notification)
+
+    def _show_remote_push_alert(self, player_name, world_name, commit):
+        """Displays popup alert notifying user that a friend pushed updates."""
+        if self._alert_dialog_open:
+            return
+        self._alert_dialog_open = True
+
+        rel_time = commit.get("relative_time", "baru saja")
+        resolved_theme = self.current_theme if self.current_theme != "system" else self.get_system_theme()
+        t = THEMES.get(resolved_theme, THEMES["light"])
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("🔔 Pemberitahuan Update World")
+        dialog.geometry("490x270")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        def on_close():
+            self._alert_dialog_open = False
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 245
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 135
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dialog.configure(bg=t["root_bg"])
+
+        # Top Header
+        header_frame = tk.Frame(dialog, bg=t["root_bg"], padx=16, pady=10)
+        header_frame.pack(fill="x")
+
+        tk.Label(
+            header_frame,
+            text="🔔  Save World Baru Ditemukan!",
+            font=("Segoe UI", 12, "bold"),
+            fg="#e65100" if resolved_theme != "dark" else "#ffb74d",
+            bg=t["root_bg"],
+            anchor="w"
+        ).pack(fill="x")
+
+        # Content Card
+        msg_frame = tk.Frame(dialog, bg=t["panel_bg"], padx=14, pady=12, bd=1, relief="ridge")
+        msg_frame.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        tk.Label(
+            msg_frame,
+            text=f"Pemain '{player_name}' baru saja melakukan push save game terbaru untuk world '{world_name}' ({rel_time}).\n\nJangan lupa untuk melakukan Pull sekarang agar save game kalian tetap sinkron dan tidak tertinggal!",
+            font=("Segoe UI", 9),
+            fg=t["label_fg"],
+            bg=t["panel_bg"],
+            justify="left",
+            wraplength=420,
+            anchor="w"
+        ).pack(fill="x")
+
+        # Buttons
+        btn_frame = tk.Frame(dialog, bg=t["root_bg"], padx=16, pady=10)
+        btn_frame.pack(fill="x", side="bottom")
+
+        def do_pull():
+            on_close()
+            self.manual_pull()
+
+        btn_pull = tk.Button(
+            btn_frame,
+            text="⬇️  Pull Sekarang (Download Save)",
+            font=("Segoe UI", 9, "bold"),
+            bg="#2e7d32",
+            fg="#ffffff",
+            activebackground="#1b5e20",
+            activeforeground="#ffffff",
+            relief="groove",
+            padx=12,
+            pady=6,
+            command=do_pull
+        )
+        btn_pull.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        btn_cancel = tk.Button(
+            btn_frame,
+            text="Nanti Saja",
+            font=("Segoe UI", 9),
+            bg=t["btn_bg"],
+            fg=t["btn_fg"],
+            relief="groove",
+            padx=10,
+            pady=6,
+            command=on_close
+        )
+        btn_cancel.pack(side="right")
 
     # =====================================================
     # CONNECT (SYNC & PLAY RAFT)
