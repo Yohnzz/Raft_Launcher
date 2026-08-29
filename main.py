@@ -744,6 +744,9 @@ class SampRaftClient:
         self.steam_running = False
         self.current_theme = self.config.get("theme", "light")
         self._themed_widgets = []  # List of (widget, attr, theme_key) tuples
+        self._last_notified_commit = None
+        self._is_checking_remote = False
+        self._alert_dialog_open = False
 
         # Load App Icon if available (.ico)
         for icon_name in ["app_icon.ico", "icon.ico", "raft.ico"]:
@@ -783,11 +786,6 @@ class SampRaftClient:
         self.root.bind("<Control-L>", lambda e: self.clear_log())
         self.root.bind("<Control-u>", lambda e: self.check_updates_gui(manual=True))
         self.root.bind("<Control-U>", lambda e: self.check_updates_gui(manual=True))
-
-        # Remote Push Notification state
-        self._last_notified_commit = None
-        self._is_checking_remote = False
-        self._alert_dialog_open = False
 
         # Check for updates in background after launch
         self.root.after(3500, lambda: self.check_updates_gui(manual=False))
