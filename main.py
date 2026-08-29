@@ -19,7 +19,7 @@ import winreg
 # =========================================================
 
 APP_NAME = "Raft Multiplayer Launcher"
-APP_VERSION = "V 0.3.7"
+APP_VERSION = "V 0.3.8"
 APP_TITLE = f"Raft Multiplayer Launcher ({APP_VERSION}) - (by Yohnzz)"
 APP_AUTHOR = "Igna"
 DEFAULT_UPDATE_REPO = "Yohnzz/Raft_Launcher"  # Default GitHub Repo for releases
