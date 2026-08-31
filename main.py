@@ -14,15 +14,24 @@ from pathlib import Path
 from datetime import datetime
 import winreg
 
+# Social / Realtime Backend
+try:
+    from social_client import SocialClient
+    SOCIAL_AVAILABLE = True
+except ImportError:
+    SOCIAL_AVAILABLE = False
+
+
 # =========================================================
 # CONFIGURATION & CONSTANTS
 # =========================================================
 
 APP_NAME = "Raft Multiplayer Launcher"
-APP_VERSION = "V 0.3.9"
+APP_VERSION = "V 0.5.0"
 APP_TITLE = f"Raft Multiplayer Launcher ({APP_VERSION}) - (by Yohnzz)"
 APP_AUTHOR = "Igna"
 DEFAULT_UPDATE_REPO = "Yohnzz/Raft_Launcher"  # Default GitHub Repo for releases
+SOCIAL_BACKEND_URL = "http://localhost:3000"     # Raft Social Backend URL
 CONFIG_FILE = "config.json"
 
 DEFAULT_CONFIG = {
@@ -747,6 +756,10 @@ class SampRaftClient:
         self._last_notified_commit = None
         self._is_checking_remote = False
         self._alert_dialog_open = False
+        self._friends_data = {}  # {steam_id: {username, status, activity, ...}}
+        self._active_chat_windows = {}  # {steam_id: ChatWindowInstance}
+        self.is_offline_mode = False
+        self._checking_internet = False
 
         # Load App Icon if available (.ico)
         for icon_name in ["app_icon.ico", "icon.ico", "raft.ico"]:
@@ -792,6 +805,27 @@ class SampRaftClient:
 
         # Check for remote pushes by friends in background periodically
         self.root.after(4500, self.poll_remote_push_notification)
+
+        # ─── SOCIAL CLIENT (Phase 3) ─────────────────────────────────────────
+        self.social = None
+        if SOCIAL_AVAILABLE:
+            self.social = SocialClient(backend_url=SOCIAL_BACKEND_URL)
+            self.social.on_connect(self._on_social_connect)
+            self.social.on_disconnect(self._on_social_disconnect)
+            self.social.on_presence_update(self._on_social_presence)
+            self.social.on_auth_result(self._on_social_auth)
+            self.social.on_message_received(self._on_social_message_received)
+            self.social.on_game_invite(self._on_social_game_invite)
+            self.social.on_game_invite_resolved(self._on_social_game_invite_resolved)
+            self.social.on_game_invite_expired(self._on_social_game_invite_expired)
+            # Auto-connect setelah 2 detik (beri waktu load_data selesai)
+            self.root.after(2000, self._social_auto_connect)
+
+        # Start periodic 10-second internet & offline mode polling
+        self.root.after(1000, self._poll_internet_status)
+
+        # Handle window close → disconnect social + cleanup
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # =====================================================
     # TOP CLASSIC MENU BAR
@@ -987,12 +1021,12 @@ class SampRaftClient:
         btn_refresh.pack(side="left", padx=2, pady=3)
 
         # Git Pull
-        btn_pull = tk.Button(self.toolbar, text="⬇️ Pull", font=("Segoe UI", 9), relief="groove", padx=6, pady=2, command=self.manual_pull)
-        btn_pull.pack(side="left", padx=2, pady=3)
+        self.btn_pull = tk.Button(self.toolbar, text="⬇️ Pull", font=("Segoe UI", 9), relief="groove", padx=6, pady=2, command=self.manual_pull)
+        self.btn_pull.pack(side="left", padx=2, pady=3)
 
         # Git Push
-        btn_push = tk.Button(self.toolbar, text="⬆️ Push", font=("Segoe UI", 9), relief="groove", padx=6, pady=2, command=self.manual_push)
-        btn_push.pack(side="left", padx=2, pady=3)
+        self.btn_push = tk.Button(self.toolbar, text="⬆️ Push", font=("Segoe UI", 9), relief="groove", padx=6, pady=2, command=self.manual_push)
+        self.btn_push.pack(side="left", padx=2, pady=3)
 
         # Open folder
         btn_open = tk.Button(self.toolbar, text="📂 Folder", font=("Segoe UI", 9), relief="groove", padx=6, pady=2, command=self.open_world_folder)
@@ -1007,7 +1041,7 @@ class SampRaftClient:
         self.btn_steam.pack(side="left", padx=2, pady=3)
 
         # Keep refs for theming
-        self._toolbar_btns = [btn_refresh, btn_pull, btn_push, btn_open, btn_clean]
+        self._toolbar_btns = [btn_refresh, self.btn_pull, self.btn_push, btn_open, btn_clean]
 
         # Separator
         ttk.Separator(self.toolbar, orient="vertical").pack(side="left", fill="y", padx=8, pady=4)
@@ -1020,10 +1054,22 @@ class SampRaftClient:
         self.combo_user.pack(side="left", padx=(0, 8), pady=4)
         self.combo_user.bind("<<ComboboxSelected>>", self.on_user_changed)
 
-        # Top Right Raft Badge
+        # Top Right Raft Badge & Offline Badge
         badge_frame = tk.Frame(self.toolbar, bg="#ff6600", padx=10, pady=2)
         badge_frame.pack(side="right", padx=6, pady=3)
         tk.Label(badge_frame, text=f"RAFT {APP_VERSION}", font=("Segoe UI", 9, "bold italic"), fg="#ffffff", bg="#ff6600").pack()
+
+        # Offline Mode Badge (Hidden by default, shown when no internet)
+        self.lbl_offline_badge = tk.Label(
+            self.toolbar,
+            text="⚠️ OFFLINE MODE",
+            font=("Segoe UI", 9, "bold"),
+            bg="#d32f2f",
+            fg="#ffffff",
+            padx=8,
+            pady=2,
+            relief="groove"
+        )
 
         # 2. MAIN CENTER AREA (SPLIT PANE: LEFT SERVER LIST, RIGHT DETAILS)
         self.main_paned = tk.PanedWindow(self.root, orient="horizontal", bg="#d9d9d9", sashrelief="ridge", sashwidth=4)
@@ -1130,7 +1176,49 @@ class SampRaftClient:
         self.lbl_info_git = tk.Label(self.info_grid, text="Git: origin/master", font=("Segoe UI", 9), bg="#f5f5f5", anchor="w")
         self.lbl_info_git.grid(row=1, column=1, sticky="w", padx=(0, 20), pady=(4, 0))
 
-        # TAB 2: Quick Settings / Paths
+        # TAB 2: Friends & Social (Realtime Presence)
+        self.tab_friends = tk.Frame(self.notebook, bg="#f5f5f5", padx=6, pady=4)
+        self.notebook.add(self.tab_friends, text=" 👥 Friends & Social (0) ")
+
+        friends_top = tk.Frame(self.tab_friends, bg="#f5f5f5")
+        friends_top.pack(fill="x", side="top", pady=(0, 4))
+
+        self.btn_refresh_friends = tk.Button(friends_top, text="🔄 Refresh Friends", font=("Segoe UI", 8), relief="groove", padx=6, pady=1, command=self.refresh_friends_list)
+        self.btn_refresh_friends.pack(side="left", padx=(0, 4))
+
+        self.lbl_friends_summary = tk.Label(friends_top, text="🟢 0 Online  |  🎮 0 Playing  |  ⚫ 0 Offline", font=("Segoe UI", 8, "bold"), fg="#333333", bg="#f5f5f5")
+        self.lbl_friends_summary.pack(side="left", padx=6)
+
+        self.btn_invite_friend = tk.Button(friends_top, text="🎮 Ajak Main", font=("Segoe UI", 8, "bold"), bg="#4caf50", fg="#ffffff", activebackground="#43a047", relief="groove", padx=8, pady=1, command=self.on_invite_friend_clicked)
+        self.btn_invite_friend.pack(side="right", padx=(4, 0))
+
+        self.btn_chat_friend = tk.Button(friends_top, text="💬 Chat", font=("Segoe UI", 8), bg="#2196f3", fg="#ffffff", activebackground="#1e88e5", relief="groove", padx=8, pady=1, command=self.on_chat_friend_clicked)
+        self.btn_chat_friend.pack(side="right", padx=(4, 0))
+
+        # Friends Table
+        friends_table_frame = tk.Frame(self.tab_friends, bg="#ffffff")
+        friends_table_frame.pack(fill="both", expand=True)
+
+        friends_scroll_y = tk.Scrollbar(friends_table_frame, orient="vertical")
+        friends_scroll_y.pack(side="right", fill="y")
+
+        friends_cols = ("status", "username", "activity", "steam_id")
+        self.friends_tree = ttk.Treeview(friends_table_frame, columns=friends_cols, show="headings", selectmode="browse", height=5, yscrollcommand=friends_scroll_y.set)
+        friends_scroll_y.config(command=self.friends_tree.yview)
+
+        self.friends_tree.heading("status", text="Status", anchor="center")
+        self.friends_tree.heading("username", text="Player Name", anchor="w")
+        self.friends_tree.heading("activity", text="Activity", anchor="w")
+        self.friends_tree.heading("steam_id", text="Steam ID", anchor="center")
+
+        self.friends_tree.column("status", width=90, minwidth=80, anchor="center")
+        self.friends_tree.column("username", width=180, minwidth=130)
+        self.friends_tree.column("activity", width=220, minwidth=150)
+        self.friends_tree.column("steam_id", width=150, minwidth=120, anchor="center")
+        self.friends_tree.pack(fill="both", expand=True)
+        self.friends_tree.bind("<Double-1>", lambda e: self.on_chat_friend_clicked())
+
+        # TAB 3: Quick Settings / Paths
         self.tab_settings = tk.Frame(self.notebook, bg="#f5f5f5", padx=8, pady=6)
         self.notebook.add(self.tab_settings, text=" Configuration & Paths ")
 
@@ -1395,7 +1483,7 @@ class SampRaftClient:
         threading.Thread(target=func, args=args, daemon=True).start()
 
     # =====================================================
-    # STEAM MANAGEMENT
+    # STEAM MANAGEMENT & NETWORK MONITORING
     # =====================================================
 
     def check_steam_status(self):
@@ -1412,6 +1500,98 @@ class SampRaftClient:
             self.log(f"✓ {msg}")
         else:
             self.log(f"✗ {msg}")
+
+    def _check_network_worker(self):
+        """Pemeriksaan socket DNS/HTTP untuk cek apakah internet aktif"""
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.5)
+            s.connect(("8.8.8.8", 53))
+            s.close()
+            return True
+        except Exception:
+            try:
+                import urllib.request
+                urllib.request.urlopen("https://www.google.com", timeout=2.5)
+                return True
+            except Exception:
+                return False
+
+    def _poll_internet_status(self):
+        """Loop di latar belakang memeriksa koneksi internet setiap 10 detik"""
+        if self._checking_internet:
+            self.root.after(10000, self._poll_internet_status)
+            return
+
+        self._checking_internet = True
+
+        def worker():
+            has_net = self._check_network_worker()
+            self.root.after(0, lambda: self._apply_network_state(has_net))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_network_state(self, has_internet):
+        """Terapkan status koneksi ke UI dan tombol-tombol online"""
+        self._checking_internet = False
+        prev_offline = self.is_offline_mode
+        self.is_offline_mode = not has_internet
+
+        if not has_internet:
+            # Masuk ke OFFLINE MODE
+            try:
+                self.lbl_offline_badge.pack(side="right", padx=(4, 6), pady=3)
+            except Exception:
+                pass
+
+            if hasattr(self, 'btn_pull'):
+                self.btn_pull.config(state="disabled")
+            if hasattr(self, 'btn_push'):
+                self.btn_push.config(state="disabled")
+            if hasattr(self, 'btn_refresh_friends'):
+                self.btn_refresh_friends.config(state="disabled")
+            if hasattr(self, 'btn_invite_friend'):
+                self.btn_invite_friend.config(state="disabled")
+            if hasattr(self, 'btn_chat_friend'):
+                self.btn_chat_friend.config(state="disabled")
+            if hasattr(self, 'lbl_friends_summary'):
+                self.lbl_friends_summary.config(text="⚠️ OFFLINE MODE: Tidak ada koneksi internet. Fitur Friends & Chat dinonaktifkan.")
+
+            if prev_offline is False:
+                self.log("⚠️ [Network] Koneksi internet terputus! Beralih ke OFFLINE MODE.")
+                self.statusbar.config(text=f"⚠️ OFFLINE MODE - Game tetap bisa dimainkan (Git Pull/Push & Social nonaktif). | {APP_AUTHOR} ({APP_VERSION})")
+        else:
+            # Masuk ke ONLINE MODE
+            try:
+                self.lbl_offline_badge.pack_forget()
+            except Exception:
+                pass
+
+            if not self.is_playing:
+                if hasattr(self, 'btn_pull'):
+                    self.btn_pull.config(state="normal")
+                if hasattr(self, 'btn_push'):
+                    self.btn_push.config(state="normal")
+
+            if hasattr(self, 'btn_refresh_friends'):
+                self.btn_refresh_friends.config(state="normal")
+            if hasattr(self, 'btn_invite_friend'):
+                self.btn_invite_friend.config(state="normal")
+            if hasattr(self, 'btn_chat_friend'):
+                self.btn_chat_friend.config(state="normal")
+
+            if prev_offline is True:
+                self.log("🌐 [Network] Koneksi internet kembali aktif! Fitur online dan Push/Pull dapat digunakan kembali.")
+                self.statusbar.config(text=f"🟢 Online. Ready. Select a world and click Connect. | {APP_AUTHOR} ({APP_VERSION})")
+                # Auto reconnect social & refresh friends
+                if hasattr(self, '_social_auto_connect'):
+                    self._social_auto_connect()
+                if hasattr(self, 'refresh_friends_list'):
+                    self.refresh_friends_list()
+
+        # Jadwalkan pemeriksaan ulang 10 detik kemudian
+        self.root.after(10000, self._poll_internet_status)
 
     # =====================================================
     # SETTINGS & FILE ACTIONS
@@ -1955,6 +2135,13 @@ class SampRaftClient:
         self.run_async(worker)
 
     def manual_pull(self):
+        if self.is_offline_mode:
+            messagebox.showwarning(
+                "⚠️ Offline Mode",
+                "Tidak ada koneksi internet. Git Pull tidak dapat dilakukan saat Offline Mode.\n\n"
+                "Launcher memeriksa ulang koneksi setiap 10 detik secara otomatis."
+            )
+            return
         repo_path = self.repo_path_var.get().strip()
         branch = self.branch_var.get().strip() or "master"
         git = GitEngine(repo_path)
@@ -1970,6 +2157,13 @@ class SampRaftClient:
             self.log(f"✗ Git pull gagal: {res['stderr']}")
 
     def manual_push(self):
+        if self.is_offline_mode:
+            messagebox.showwarning(
+                "⚠️ Offline Mode",
+                "Tidak ada koneksi internet. Git Push tidak dapat dilakukan saat Offline Mode.\n\n"
+                "Push akan dapat dilakukan kembali setelah koneksi internet pulih (launcher akan otomatis mendeteksi)."
+            )
+            return
         repo_path = self.repo_path_var.get().strip()
         branch = self.branch_var.get().strip() or "master"
         git = GitEngine(repo_path)
@@ -2228,7 +2422,7 @@ class SampRaftClient:
         self.root.wait_window(dialog)
         return selected_mode["mode"]
 
-    def start_sync_and_play(self):
+    def start_sync_and_play(self, force_mode=None, target_world=None):
         if self.is_playing:
             return
 
@@ -2243,6 +2437,14 @@ class SampRaftClient:
             if ans:
                 self.launch_steam_app()
             return
+
+        # Select target world if provided
+        if target_world:
+            for item in self.tree.get_children():
+                if str(self.tree.item(item)["values"][0]).lower() == str(target_world).lower():
+                    self.tree.selection_set(item)
+                    self.tree.focus(item)
+                    break
 
         selected = self.tree.selection()
         if not selected:
@@ -2261,10 +2463,36 @@ class SampRaftClient:
         if not raft_exe:
             return
 
-        # Prompt user to choose game mode (Solo vs Multiplayer)
-        mode = self.prompt_game_mode(world_name)
-        if not mode:
-            return
+        # Prompt user to choose game mode or use force_mode
+        if force_mode:
+            mode = force_mode
+        else:
+            mode = self.prompt_game_mode(world_name)
+            if not mode:
+                return
+
+        # ── OFFLINE MODE GUARD ─────────────────────────────────────────────────
+        if self.is_offline_mode:
+            if mode == "multiplayer":
+                messagebox.showwarning(
+                    "⚠️ Offline Mode - Multiplayer Tidak Tersedia",
+                    "Anda sedang dalam OFFLINE MODE (tidak ada koneksi internet).\n\n"
+                    "Mode Multiplayer / Mabar membutuhkan koneksi internet aktif.\n\n"
+                    "Anda masih bisa bermain Mode Solo (tanpa Auto Pull/Push)."
+                )
+                return
+            else:
+                # Solo offline: boleh main tapi tanpa pull/push
+                ans = messagebox.askyesno(
+                    "⚠️ Offline Mode - Main Solo Tanpa Sync",
+                    "Anda sedang dalam OFFLINE MODE (tidak ada koneksi internet).\n\n"
+                    "Git Pull/Push tidak tersedia, tapi Anda tetap bisa main Raft secara SOLO.\n\n"
+                    "Saat internet kembali aktif, Anda dapat melakukan Push secara manual.\n\n"
+                    "Lanjutkan bermain Offline Solo?"
+                )
+                if not ans:
+                    return
+        # ──────────────────────────────────────────────────────────────────────
 
         repo_path = self.repo_path_var.get().strip()
         remote_url = self.remote_url_var.get().strip()
@@ -2272,6 +2500,10 @@ class SampRaftClient:
 
         self.save_current_settings(silent=True)
         self.is_playing = True
+        # Kirim status PLAYING ke Social Backend
+        if self.social and self.social.is_connected:
+            self.social.set_playing()
+            self.log("[Social] Status: PLAYING")
         mode_label = "Solo" if mode == "solo" else "Multi"
         self.btn_connect.config(state="disabled", text=f"⏳ Running ({mode_label})...", bg="#9e9e9e")
 
@@ -2293,13 +2525,16 @@ class SampRaftClient:
                         self.log(f"✗ Setup repo gagal: {msg}")
                         return
 
-                # 2. Pull latest from remote
-                self.log(f"Git pull origin/{branch} (Auto-Stash)...")
-                pull_res = git.pull(branch=branch)
-                if pull_res["success"]:
-                    self.log("✓ Progress terbaru ditarik dari GitHub.")
+                # 2. Pull latest from remote (skip if offline)
+                if self.is_offline_mode:
+                    self.log("⚠️ OFFLINE MODE: Melewati Git Pull. Main dengan save game lokal yang tersedia.")
                 else:
-                    self.log(f"⚠️ Catatan pull: {pull_res['stderr'] or pull_res['stdout']}")
+                    self.log(f"Git pull origin/{branch} (Auto-Stash)...")
+                    pull_res = git.pull(branch=branch)
+                    if pull_res["success"]:
+                        self.log("✓ Progress terbaru ditarik dari GitHub.")
+                    else:
+                        self.log(f"⚠️ Catatan pull: {pull_res['stderr'] or pull_res['stdout']}")
 
                 # 3. Install latest save into Raft
                 ok, sync_msg = RaftWorldManager.sync_from_repo(repo_path, world_local_path, world_name)
@@ -2332,24 +2567,686 @@ class SampRaftClient:
                     return
                 self.log(f"✓ {sync_repo_msg}")
 
-                # 6. Commit & Push
-                self.log("Mengunggah save game ke GitHub...")
-                git.add_all()
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                player = self.get_selected_player_name()
-                git.commit(f"[{player}] Update world '{world_name}' - {now_str}")
-                push_res = git.push(branch=branch)
-                if push_res["success"]:
-                    self.log("🎉 SYNC SUKSES! Save terbaru sudah berada di GitHub.")
+                # 6. Commit & Push (skip if offline)
+                if self.is_offline_mode:
+                    self.log("⚠️ OFFLINE MODE: Melewati Git Push. Save game tersimpan secara lokal.")
+                    self.log("💡 Gunakan tombol '⬆️ Push' setelah koneksi internet kembali aktif untuk mengunggah save ke GitHub.")
                 else:
-                    self.log(f"⚠️ Push error: {push_res['stderr']}")
+                    self.log("Mengunggah save game ke GitHub...")
+                    git.add_all()
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    player = self.get_selected_player_name()
+                    git.commit(f"[{player}] Update world '{world_name}' - {now_str}")
+                    push_res = git.push(branch=branch)
+                    if push_res["success"]:
+                        self.log("🎉 SYNC SUKSES! Save terbaru sudah berada di GitHub.")
+                    else:
+                        self.log(f"⚠️ Push error: {push_res['stderr']}")
             else:
                 self.log("👥 Mode Multiplayer selesai. Gunakan tombol '⬆️ Push' manual jika ingin mengunggah save game.")
 
         finally:
             self.is_playing = False
+            # Kirim status ONLINE kembali ke Social Backend
+            if self.social and self.social.is_connected:
+                self.social.set_online()
+                self.log("[Social] Status: ONLINE (Raft ditutup)")
             self.root.after(0, lambda: self.btn_connect.config(state="normal", text="▶ Connect", bg="#4caf50"))
             self.root.after(0, self.refresh_worlds)
+
+    # =====================================================
+    # SOCIAL CLIENT METHODS (Phase 3 & 4: Friends & Presence)
+    # =====================================================
+
+    def _social_auto_connect(self):
+        """Auto-connect ke social backend menggunakan Steam ID aktif"""
+        if not self.social:
+            return
+
+        # Ambil Steam ID dan persona name dari akun yang terpilih
+        steam_id = None
+        username = None
+
+        accounts = SteamManager.get_accounts()
+        if accounts:
+            # Cari akun MostRecent
+            for acc in accounts:
+                if acc.get("most_recent"):
+                    steam_id = acc.get("steamid")
+                    username = acc.get("persona_name", acc.get("account_name"))
+                    break
+            # Fallback ke akun pertama
+            if not steam_id and accounts:
+                steam_id = accounts[0].get("steamid")
+                username = accounts[0].get("persona_name", accounts[0].get("account_name"))
+
+        if steam_id and username:
+            self.log(f"[Social] Connecting sebagai {username} ({steam_id})...")
+            self.social.connect(steam_id=steam_id, username=username)
+        else:
+            self.log("[Social] Steam account tidak terdeteksi, social features disabled.")
+
+    def _on_social_connect(self):
+        """Callback: berhasil connect ke backend"""
+        self.root.after(0, lambda: self.log("[Social] Connected ke backend"))
+
+    def _on_social_disconnect(self):
+        """Callback: disconnect dari backend"""
+        self.root.after(0, lambda: self.log("[Social] Disconnected dari backend"))
+        # Reset friends status ke offline
+        for sid in self._friends_data:
+            self._friends_data[sid]["status"] = "OFFLINE"
+        self.root.after(0, self._render_friends_tree)
+
+    def _on_social_auth(self, success, user):
+        """Callback: hasil auth dari backend"""
+        if success:
+            uname = user.get("username", "?") if user else "?"
+            self.root.after(0, lambda: self.log(f"[Social] Login OK: {uname} | Status: ONLINE"))
+            # Auto fetch all friends/users
+            self.root.after(500, self.refresh_friends_list)
+        else:
+            self.root.after(0, lambda: self.log("[Social] Login gagal"))
+
+    def _on_social_presence(self, data):
+        """Callback: ada user lain yang berubah status realtime"""
+        sid = data.get("steam_id")
+        name = data.get("username", "?")
+        status = data.get("status", "OFFLINE")
+
+        if sid:
+            if sid not in self._friends_data:
+                self._friends_data[sid] = {"steam_id": sid, "username": name, "status": status}
+            else:
+                self._friends_data[sid]["username"] = name
+                self._friends_data[sid]["status"] = status
+
+        self.root.after(0, lambda: self.log(f"[Social] {name} -> {status}"))
+        self.root.after(0, self._render_friends_tree)
+
+    def refresh_friends_list(self):
+        """Request daftar seluruh user/teman dari server"""
+        if not self.social or not self.social.is_connected:
+            self.log("[Social] Backend belum terhubung. Mencoba reconnect...")
+            self._social_auto_connect()
+            return
+
+        self.social.get_all_users(self._on_friends_loaded)
+
+    def _on_friends_loaded(self, users):
+        """Callback saat server merespon daftar user"""
+        for u in users:
+            sid = u.get("steam_id")
+            if sid:
+                self._friends_data[sid] = u
+        self.root.after(0, self._render_friends_tree)
+
+    def _render_friends_tree(self):
+        """Render isi Treeview Friends dan perbarui ringkasan count"""
+        if not hasattr(self, 'friends_tree'):
+            return
+
+        # Simpan item yang sedang dipilih
+        selected = self.friends_tree.selection()
+        selected_sid = None
+        if selected:
+            item_vals = self.friends_tree.item(selected[0])["values"]
+            if item_vals and len(item_vals) >= 4:
+                selected_sid = str(item_vals[3])
+
+        # Bersihkan tree
+        for item in self.friends_tree.get_children():
+            self.friends_tree.delete(item)
+
+        # Hitung statistik
+        online_count = 0
+        playing_count = 0
+        offline_count = 0
+
+        # Sort: PLAYING first, then ONLINE, then OFFLINE
+        status_weight = {"PLAYING": 1, "ONLINE": 2, "OFFLINE": 3}
+        sorted_users = sorted(
+            self._friends_data.values(),
+            key=lambda x: (status_weight.get(x.get("status", "OFFLINE"), 99), x.get("username", "").lower())
+        )
+
+        item_to_select = None
+        my_sid = str(self.social.steam_id) if (self.social and self.social.steam_id) else ""
+
+        for u in sorted_users:
+            sid = str(u.get("steam_id", ""))
+            uname = u.get("username", "Unknown")
+            st = u.get("status", "OFFLINE")
+
+            # Tag current player
+            is_me = (sid == my_sid)
+            display_name = f"{uname} (You)" if is_me else uname
+
+            if st == "PLAYING":
+                playing_count += 1
+                status_icon = "🎮 Playing"
+                activity = "🎮 Playing Raft"
+            elif st == "ONLINE":
+                online_count += 1
+                status_icon = "🟢 Online"
+                activity = "In Launcher"
+            else:
+                offline_count += 1
+                status_icon = "⚫ Offline"
+                activity = "Offline"
+
+            row_id = self.friends_tree.insert("", "end", values=(status_icon, display_name, activity, sid))
+
+            if sid == selected_sid:
+                item_to_select = row_id
+
+        if item_to_select:
+            self.friends_tree.selection_set(item_to_select)
+
+        # Update labels & tab title
+        total_active = online_count + playing_count
+        self.lbl_friends_summary.config(
+            text=f"🟢 {online_count} Online  |  🎮 {playing_count} Playing  |  ⚫ {offline_count} Offline"
+        )
+        try:
+            self.notebook.tab(self.tab_friends, text=f" 👥 Friends & Social ({total_active}) ")
+        except Exception:
+            pass
+
+    def on_invite_friend_clicked(self):
+        """Handler tombol Ajak Main (Phase 6 & 7)"""
+        selected = self.friends_tree.selection()
+        if not selected:
+            messagebox.showwarning("Pilih Teman", "Silakan klik salah satu teman pada tabel Friends terlebih dahulu.")
+            return
+
+        vals = self.friends_tree.item(selected[0])["values"]
+        status_text = str(vals[0])
+        uname = str(vals[1]).replace(" (You)", "")
+        sid = str(vals[3])
+
+        my_sid = str(self.social.steam_id) if (self.social and self.social.steam_id) else ""
+        if sid == my_sid:
+            messagebox.showinfo("Ajak Main", "Kamu tidak bisa mengajak diri sendiri bermain!")
+            return
+
+        if "Offline" in status_text:
+            messagebox.showinfo("Teman Offline", f"Pemain '{uname}' sedang offline. Undangan bermain hanya bisa dikirim saat teman sedang aktif di launcher.")
+            return
+
+        # Dapatkan nama world yang sedang dipilih (atau default)
+        world_name = "Arkananta"
+        tree_sel = self.tree.selection()
+        if tree_sel:
+            world_name = str(self.tree.item(tree_sel[0])["values"][0])
+
+        self.log(f"[Invite] Mengirim ajakan bermain ke {uname} ({sid}) untuk world '{world_name}'...")
+
+        def on_invite_result(res):
+            if res.get("is_playing"):
+                # Teman sudah berada di dalam game Raft!
+                def alert_playing():
+                    messagebox.showinfo(
+                        "Pemain Sudah di Dalam Game!",
+                        f"🎮 Pemain '{uname}' sudah masuk dan sedang bermain di dalam game Raft!\n\n"
+                        "Silakan langsung bergabung (join) ke sesi permainannya melalui Steam Friends atau menu Join In-Game."
+                    )
+                self.root.after(0, alert_playing)
+            elif res.get("success"):
+                self.root.after(0, lambda: self.log(f"[Invite] 🎮 Undangan berhasil dikirim ke {uname}. Menunggu konfirmasi..."))
+                def alert_sent():
+                    messagebox.showinfo(
+                        "Undangan Terkirim",
+                        f"🎮 Undangan bermain Raft (World '{world_name}') telah dikirim ke {uname}!\n\n"
+                        "Menunggu respons pemain (kedaluwarsa dalam 60 detik)..."
+                    )
+                self.root.after(0, alert_sent)
+            else:
+                err_msg = res.get("error", "Gagal mengirim undangan")
+                self.root.after(0, lambda: messagebox.showwarning("Gagal Mengajak Main", err_msg))
+
+        self.social.send_game_invite(sid, world_name, on_invite_result)
+
+    def _on_social_game_invite(self, data):
+        """Callback saat menerima undangan bermain dari teman secara realtime"""
+        invite_id = data.get("invite_id")
+        from_name = data.get("from_username", "Teman")
+        world_name = data.get("world_name", "Arkananta")
+        timeout_sec = data.get("timeout_sec", 60)
+
+        self.root.after(0, lambda: self.log(f"[Invite] 🎮 Undangan bermain masuk dari '{from_name}' untuk World '{world_name}'"))
+
+        def show_invite_dialog():
+            GameInviteDialog(
+                parent=self.root,
+                invite_id=invite_id,
+                from_username=from_name,
+                world_name=world_name,
+                timeout_sec=timeout_sec,
+                on_accept=self._accept_game_invite,
+                on_reject=self._reject_game_invite
+            )
+
+        self.root.after(0, show_invite_dialog)
+
+    def _accept_game_invite(self, invite_id, from_name, world_name):
+        """Pemain menerima undangan main -> Kirim konfirmasi dan langsung buka mode Mabar"""
+        self.log(f"[Invite] ✅ Menerima undangan main dari '{from_name}' untuk World '{world_name}'.")
+        self.social.respond_game_invite(invite_id, accepted=True)
+
+        # Otomatis jalankan game Raft dalam Mode Multiplayer / Mabar
+        self.root.after(500, lambda: self.start_sync_and_play(force_mode="multiplayer", target_world=world_name))
+
+    def _reject_game_invite(self, invite_id, from_name, world_name):
+        """Pemain menolak undangan main"""
+        self.log(f"[Invite] ❌ Menolak undangan main dari '{from_name}'.")
+        self.social.respond_game_invite(invite_id, accepted=False)
+
+    def _on_social_game_invite_resolved(self, data):
+        """Callback saat pengirim menerima konfirmasi respons dari penerima"""
+        accepted = data.get("accepted")
+        responder_name = data.get("responder_username", "Teman")
+        world_name = data.get("world_name", "Arkananta")
+
+        if accepted:
+            self.root.after(0, lambda: self.log(f"[Invite] 🎉 '{responder_name}' MENERIMA ajakan main untuk World '{world_name}'!"))
+            def notify_accepted():
+                ans = messagebox.askyesno(
+                    "Ajakan Main Diterima! 🎉",
+                    f"Pemain '{responder_name}' telah MENERIMA ajakan bermainmu untuk World '{world_name}'!\n\n"
+                    "Apakah Anda ingin membuka game Raft (Mode Mabar) sekarang?"
+                )
+                if ans and not self.is_playing:
+                    self.start_sync_and_play(force_mode="multiplayer", target_world=world_name)
+            self.root.after(0, notify_accepted)
+        else:
+            self.root.after(0, lambda: self.log(f"[Invite] ℹ️ '{responder_name}' menolak ajakan main."))
+            def notify_rejected():
+                messagebox.showinfo(
+                    "Ajakan Main Ditolak",
+                    f"Pemain '{responder_name}' sedang tidak dapat bergabung untuk bermain saat ini."
+                )
+            self.root.after(0, notify_rejected)
+
+    def _on_social_game_invite_expired(self, data):
+        """Callback saat undangan kedaluwarsa"""
+        self.root.after(0, lambda: self.log("[Invite] ⏳ Undangan bermain telah kedaluwarsa (timeout 60 detik)."))
+
+    def on_chat_friend_clicked(self):
+        """Handler tombol Chat (Phase 5)"""
+        selected = self.friends_tree.selection()
+        if not selected:
+            messagebox.showwarning("Pilih Teman", "Silakan klik salah satu teman pada tabel Friends terlebih dahulu.")
+            return
+
+        vals = self.friends_tree.item(selected[0])["values"]
+        uname = str(vals[1]).replace(" (You)", "")
+        sid = str(vals[3])
+
+        my_sid = str(self.social.steam_id) if (self.social and self.social.steam_id) else ""
+        if sid == my_sid:
+            messagebox.showinfo("Chat", "Kamu tidak bisa membuka chat dengan diri sendiri.")
+            return
+
+        self.open_chat_window(sid, uname)
+
+    def open_chat_window(self, friend_steam_id, friend_username):
+        """Buka atau fokus ke jendela chat dengan pemain tertentu"""
+        friend_steam_id = str(friend_steam_id)
+        if friend_steam_id in self._active_chat_windows:
+            try:
+                chat_win = self._active_chat_windows[friend_steam_id]
+                chat_win.win.deiconify()
+                chat_win.win.lift()
+                chat_win.entry_msg.focus()
+                return
+            except Exception:
+                del self._active_chat_windows[friend_steam_id]
+
+        chat_dlg = ChatDialog(
+            parent=self.root,
+            social_client=self.social,
+            friend_steam_id=friend_steam_id,
+            friend_username=friend_username,
+            on_close_callback=self._on_chat_window_closed
+        )
+        self._active_chat_windows[friend_steam_id] = chat_dlg
+
+    def _on_chat_window_closed(self, friend_steam_id):
+        """Hapus referensi saat jendela chat ditutup"""
+        if friend_steam_id in self._active_chat_windows:
+            del self._active_chat_windows[friend_steam_id]
+
+    def _on_social_message_received(self, data):
+        """Callback saat ada pesan chat baru masuk realtime dari server"""
+        sender_sid = str(data.get("sender_steam_id", ""))
+        sender_name = data.get("sender_username", "Teman")
+        msg_text = data.get("message", "")
+
+        self.root.after(0, lambda: self.log(f"[Chat] 💬 Pesan dari {sender_name}: {msg_text}"))
+
+        # Jika jendela chat sedang terbuka untuk pengirim ini, masukkan pesan langsung
+        if sender_sid in self._active_chat_windows:
+            try:
+                chat_win = self._active_chat_windows[sender_sid]
+                raw_time = data.get("created_at", "")
+                time_display = raw_time[11:16] if raw_time else ""
+                self.root.after(0, lambda: chat_win.append_message(sender_name, msg_text, timestamp=time_display, is_me=False))
+                return
+            except Exception:
+                pass
+
+        # Jika belum dibuka, beri notifikasi popup
+        def notify_user():
+            ans = messagebox.askyesno(
+                "💬 Pesan Chat Baru!",
+                f"Pemain '{sender_name}' mengirim pesan:\n\"{msg_text}\"\n\nApakah Anda ingin membuka jendela obrolan sekarang?"
+            )
+            if ans:
+                self.open_chat_window(sender_sid, sender_name)
+
+        self.root.after(0, notify_user)
+
+    def _on_close(self):
+        """Handler saat window ditutup — disconnect social + destroy"""
+        # Tutup semua jendela chat yang aktif
+        for sid, dlg in list(self._active_chat_windows.items()):
+            try:
+                dlg.win.destroy()
+            except Exception:
+                pass
+        self._active_chat_windows.clear()
+
+        if self.social:
+            self.social.disconnect()
+        self.root.destroy()
+
+
+# =========================================================
+# REALTIME CHAT DIALOG (Phase 5)
+# =========================================================
+
+class ChatDialog:
+    """Jendela Chat Realtime Popup untuk obrolan langsung antar pemain"""
+
+    def __init__(self, parent, social_client, friend_steam_id, friend_username, on_close_callback=None):
+        self.parent = parent
+        self.social = social_client
+        self.friend_steam_id = str(friend_steam_id)
+        self.friend_username = friend_username
+        self.on_close_callback = on_close_callback
+
+        self.win = tk.Toplevel(parent)
+        self.win.title(f"💬 Chat - {self.friend_username}")
+        self.win.geometry("480x540")
+        self.win.minsize(380, 420)
+        self.win.configure(bg="#f5f5f5")
+
+        self.setup_ui()
+        self.load_history()
+
+        self.win.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def setup_ui(self):
+        # 1. Header bar
+        header = tk.Frame(self.win, bg="#2196f3", padx=12, pady=10)
+        header.pack(fill="x", side="top")
+
+        lbl_name = tk.Label(header, text=f"👤 {self.friend_username}", font=("Segoe UI", 11, "bold"), fg="#ffffff", bg="#2196f3")
+        lbl_name.pack(side="left")
+
+        lbl_sid = tk.Label(header, text=f"Steam ID: {self.friend_steam_id}", font=("Segoe UI", 8), fg="#e3f2fd", bg="#2196f3")
+        lbl_sid.pack(side="right", padx=(0, 4))
+
+        # 2. Messages scrollable container
+        msg_frame = tk.Frame(self.win, bg="#f5f5f5", padx=6, pady=6)
+        msg_frame.pack(fill="both", expand=True)
+
+        scroll = tk.Scrollbar(msg_frame, orient="vertical")
+        scroll.pack(side="right", fill="y")
+
+        self.text_area = tk.Text(
+            msg_frame,
+            font=("Segoe UI", 9),
+            bg="#ffffff",
+            fg="#222222",
+            wrap="word",
+            state="disabled",
+            padx=10,
+            pady=8,
+            yscrollcommand=scroll.set
+        )
+        self.text_area.pack(fill="both", expand=True)
+        scroll.config(command=self.text_area.yview)
+
+        # Tags styling
+        self.text_area.tag_config("me_header", font=("Segoe UI", 9, "bold"), foreground="#1565c0")
+        self.text_area.tag_config("friend_header", font=("Segoe UI", 9, "bold"), foreground="#2e7d32")
+        self.text_area.tag_config("time", font=("Segoe UI", 8), foreground="#888888")
+        self.text_area.tag_config("msg_body", font=("Segoe UI", 9), foreground="#212121")
+        self.text_area.tag_config("system", font=("Segoe UI", 8, "italic"), foreground="#757575")
+
+        # 3. Bottom Input Area
+        input_frame = tk.Frame(self.win, bg="#e0e0e0", padx=8, pady=8)
+        input_frame.pack(fill="x", side="bottom")
+
+        self.entry_msg = tk.Entry(input_frame, font=("Segoe UI", 9), bg="#ffffff")
+        self.entry_msg.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=4)
+        self.entry_msg.bind("<Return>", lambda e: self.send_message())
+
+        self.btn_send = tk.Button(
+            input_frame,
+            text="Kirim ✉️",
+            font=("Segoe UI", 9, "bold"),
+            bg="#2196f3",
+            fg="#ffffff",
+            activebackground="#1e88e5",
+            relief="groove",
+            padx=14,
+            pady=3,
+            command=self.send_message
+        )
+        self.btn_send.pack(side="right")
+
+        self.entry_msg.focus()
+
+    def append_message(self, sender_name, msg_text, timestamp=None, is_me=False):
+        self.text_area.config(state="normal")
+        time_str = timestamp if timestamp else datetime.now().strftime("%H:%M")
+
+        header_tag = "me_header" if is_me else "friend_header"
+        display_sender = f"{sender_name} (You)" if is_me else sender_name
+
+        self.text_area.insert("end", f"{display_sender} ", header_tag)
+        self.text_area.insert("end", f"[{time_str}]\n", "time")
+        self.text_area.insert("end", f"{msg_text}\n\n", "msg_body")
+        self.text_area.config(state="disabled")
+        self.text_area.see("end")
+
+    def append_system_msg(self, text):
+        self.text_area.config(state="normal")
+        self.text_area.insert("end", f"ℹ️ {text}\n\n", "system")
+        self.text_area.config(state="disabled")
+        self.text_area.see("end")
+
+    def load_history(self):
+        if not self.social or not self.social.is_connected:
+            self.append_system_msg("Social Backend belum terhubung.")
+            return
+
+        self.append_system_msg("Memuat riwayat percakapan...")
+
+        def on_loaded(messages):
+            try:
+                self.win.after(0, lambda: self._render_history(messages))
+            except Exception:
+                pass
+
+        self.social.get_chat_history(self.friend_steam_id, on_loaded, limit=50)
+
+    def _render_history(self, messages):
+        self.text_area.config(state="normal")
+        self.text_area.delete("1.0", "end")
+        self.text_area.config(state="disabled")
+
+        if not messages:
+            self.append_system_msg(f"Belum ada riwayat pesan dengan {self.friend_username}. Mulai percakapan sekarang!")
+            return
+
+        my_sid = str(self.social.steam_id) if (self.social and self.social.steam_id) else ""
+        for m in messages:
+            sender_sid = str(m.get("sender_steam_id", ""))
+            is_me = (sender_sid == my_sid)
+            s_name = "You" if is_me else m.get("sender_username", self.friend_username)
+            raw_time = str(m.get("created_at", ""))
+            time_display = ""
+            if len(raw_time) >= 16:
+                try:
+                    time_display = raw_time[11:16]
+                except Exception:
+                    time_display = ""
+            self.append_message(s_name, m.get("message", ""), timestamp=time_display, is_me=is_me)
+
+    def send_message(self):
+        text = self.entry_msg.get().strip()
+        if not text:
+            return
+
+        if not self.social or not self.social.is_connected:
+            messagebox.showwarning("Koneksi Terputus", "Tidak dapat mengirim pesan: Anda sedang tidak terhubung ke Social Backend.", parent=self.win)
+            return
+
+        self.entry_msg.delete(0, "end")
+        my_username = self.social.username or "You"
+
+        def on_sent(success, data):
+            if success:
+                try:
+                    self.win.after(0, lambda: self.append_message(my_username, text, is_me=True))
+                except Exception:
+                    pass
+            else:
+                err_msg = str(data)
+                try:
+                    self.win.after(0, lambda: self.append_system_msg(f"Gagal mengirim: {err_msg}"))
+                except Exception:
+                    pass
+
+        self.social.send_message(self.friend_steam_id, text, on_sent)
+
+    def on_close(self):
+        if self.on_close_callback:
+            self.on_close_callback(self.friend_steam_id)
+        self.win.destroy()
+
+
+# =========================================================
+# GAME INVITE DIALOG POPUP (Phase 6 & 7)
+# =========================================================
+
+class GameInviteDialog:
+    """Modal popup interaktif saat menerima ajakan main dari teman dengan countdown timer"""
+
+    def __init__(self, parent, invite_id, from_username, world_name, timeout_sec=60, on_accept=None, on_reject=None):
+        self.parent = parent
+        self.invite_id = invite_id
+        self.from_username = from_username
+        self.world_name = world_name
+        self.time_left = timeout_sec
+        self.on_accept = on_accept
+        self.on_reject = on_reject
+        self._timer_id = None
+
+        self.win = tk.Toplevel(parent)
+        self.win.title("🎮 Undangan Bermain Raft!")
+        self.win.geometry("440x260")
+        self.win.resizable(False, False)
+        self.win.configure(bg="#f5f5f5")
+
+        # Focus & bring to front
+        self.win.attributes("-topmost", True)
+        self.win.lift()
+
+        self.setup_ui()
+        self._start_timer()
+
+        self.win.protocol("WM_DELETE_WINDOW", self.reject)
+
+    def setup_ui(self):
+        # Header bar
+        header = tk.Frame(self.win, bg="#ff6600", padx=12, pady=10)
+        header.pack(fill="x", side="top")
+
+        tk.Label(header, text="🎮 UNDANGAN BERMAIN RAFT!", font=("Segoe UI", 12, "bold"), fg="#ffffff", bg="#ff6600").pack(side="left")
+
+        # Content Box
+        body = tk.Frame(self.win, bg="#f5f5f5", padx=20, pady=14)
+        body.pack(fill="both", expand=True)
+
+        msg = f"Pemain '{self.from_username}' mengajakmu bermain Raft bersama!\n\nWorld Target: {self.world_name}\nMode: Multiplayer (Mabar)"
+        tk.Label(body, text=msg, font=("Segoe UI", 10), justify="left", fg="#222222", bg="#f5f5f5").pack(anchor="w", pady=(0, 10))
+
+        self.lbl_timer = tk.Label(body, text=f"⏱️ Waktu respons: {self.time_left} detik", font=("Segoe UI", 9, "bold"), fg="#d32f2f", bg="#f5f5f5")
+        self.lbl_timer.pack(anchor="w")
+
+        # Action Buttons
+        btn_frame = tk.Frame(self.win, bg="#e0e0e0", padx=12, pady=10)
+        btn_frame.pack(fill="x", side="bottom")
+
+        self.btn_accept = tk.Button(
+            btn_frame,
+            text="✅ TERIMA (Masuk Mabar)",
+            font=("Segoe UI", 9, "bold"),
+            bg="#2e7d32",
+            fg="#ffffff",
+            activebackground="#1b5e20",
+            activeforeground="#ffffff",
+            relief="groove",
+            padx=14,
+            pady=4,
+            command=self.accept
+        )
+        self.btn_accept.pack(side="right", padx=(8, 0))
+
+        self.btn_reject = tk.Button(
+            btn_frame,
+            text="❌ TOLAK",
+            font=("Segoe UI", 9),
+            bg="#e0e0e0",
+            relief="groove",
+            padx=14,
+            pady=4,
+            command=self.reject
+        )
+        self.btn_reject.pack(side="right")
+
+    def _start_timer(self):
+        if self.time_left > 0:
+            self.lbl_timer.config(text=f"⏱️ Waktu respons: {self.time_left} detik")
+            self.time_left -= 1
+            self._timer_id = self.win.after(1000, self._start_timer)
+        else:
+            self.reject()
+
+    def accept(self):
+        if self._timer_id:
+            try:
+                self.win.after_cancel(self._timer_id)
+            except Exception:
+                pass
+        self.win.destroy()
+        if self.on_accept:
+            self.on_accept(self.invite_id, self.from_username, self.world_name)
+
+    def reject(self):
+        if self._timer_id:
+            try:
+                self.win.after_cancel(self._timer_id)
+            except Exception:
+                pass
+        self.win.destroy()
+        if self.on_reject:
+            self.on_reject(self.invite_id, self.from_username, self.world_name)
 
 
 # =========================================================

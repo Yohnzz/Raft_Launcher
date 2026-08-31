@@ -1,32 +1,28 @@
-=========================================================
 RAFT MULTIPLAYER LAUNCHER - TERMS & USER AGREEMENT
-=========================================================
 
-Selamat datang di Raft Multiplayer Launcher!
+Welcome to Raft Multiplayer Launcher!
 
-Sebelum menginstal dan menggunakan aplikasi ini, harap membaca dan
-menyetujui ketentuan penggunaan berikut:
+Before installing and using this application, please read and agree to the following terms of use:
 
-1. TUJUAN APLIKASI
-   Raft Multiplayer Launcher dirancang untuk memudahkan sinkronisasi
-   save game dan permainan multiplayer turn-based / co-op pada game Raft
-   secara otomatis melalui Git & GitHub.
+1. PURPOSE OF APPLICATION
+Raft Multiplayer Launcher is designed to automate save-game synchronization and facilitate turn-based / co-op multiplayer gameplay in Raft using Git & GitHub.
 
-2. SINKRONISASI SAVE GAME
-   - Aplikasi ini akan membaca dan memperbarui save game Raft Anda
-     sesuai dengan world repository bersama yang telah ditentukan.
-   - Aplikasi secara otomatis membuat cadangan (backup) save game lokal
-     sebelum melakukan pembaruan untuk menjaga keamanan data Anda.
+2. SAVE-GAME SYNCHRONIZATION
 
-3. PRIVASI & KEAMANAN
-   - Aplikasi tidak mengumpulkan atau mengirimkan data pribadi Anda
-     ke server pihak ketiga selain repositori GitHub yang Anda konfigurasikan.
-   - Kredensial dan pengaturan disimpan secara lokal di komputer Anda.
+This application will read and update your Raft save games based on the specified shared world repository.
 
-4. DUKUNGAN & PEMBARUAN
-   - Pengembang terus memperbarui fitur dan stabilitas launcher.
-   - Anda dapat memeriksa pembaruan kapan saja melalui menu 'Help > Check for Updates'.
+The application automatically creates a local save-game backup before performing any updates to keep your data safe.
 
-Dengan memilih "I accept the agreement" (Saya Setuju), Anda menyetujui
-ketentuan di atas dan dapat melanjutkan proses instalasi.
-=========================================================
+3. PRIVACY & SECURITY
+
+The application does not collect or send your personal data to third-party servers, other than your configured GitHub repository.
+
+Your credentials and settings are stored locally on your computer.
+
+4. SUPPORT & UPDATES
+
+The developer continuously updates the launcher's features and stability.
+
+You can check for updates at any time via the menu (Help > Check for Updates).
+
+By selecting "I accept the agreement", you agree to the terms above and may proceed with the installation.
